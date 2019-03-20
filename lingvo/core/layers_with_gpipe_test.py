@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import parameterized
 import numpy as np
 import tensorflow as tf
 
@@ -85,12 +86,13 @@ class GPipeTransformerLayerTest(tf.test.TestCase):
                           [1.10429943, -1.64884555, 0.15726769, -0.00250494])
 
 
-class LayersWithGPipeTest(tf.test.TestCase):
+class GPipeTransformerStackTest(tf.test.TestCase):
+  """Tests for GPipeTransformerStack layer."""
 
   def _TransformerParams(self,
                          num_decoder_layers=0,
                          num_encoder_layers=4,
-                         num_splits=1,
+                         splits=1,
                          num_micro_batches=1):
     model_dim = 2
     params = GPipeTransformerStack.Params()
@@ -103,7 +105,7 @@ class LayersWithGPipeTest(tf.test.TestCase):
     params.encoder_tpl.tr_atten_tpl.num_attention_heads = 1
     params.encoder_tpl.tr_fflayer_tpl.hidden_dim = model_dim
     params.num_micro_batches = num_micro_batches
-    params.num_splits = num_splits
+    params.splits = splits
     params.random_seed = 0
     return params
 
@@ -126,7 +128,7 @@ class LayersWithGPipeTest(tf.test.TestCase):
     return inputs, paddings, tgt_inputs, tgt_paddings
 
   def _testGPipeTransformerEncoderFPropDefaultTheta(self,
-                                                    num_splits=1,
+                                                    splits=1,
                                                     num_micro_batches=1):
     batch = 4
     tf.flags.FLAGS.tpu_compatible = True
@@ -134,7 +136,7 @@ class LayersWithGPipeTest(tf.test.TestCase):
       params = self._TransformerParams(
           num_decoder_layers=4,
           num_encoder_layers=4,
-          num_splits=num_splits,
+          splits=splits,
           num_micro_batches=num_micro_batches)
       params.dtype = tf.float32
       params.fprop_dtype = tf.float32
@@ -151,12 +153,12 @@ class LayersWithGPipeTest(tf.test.TestCase):
                                           [[0.21085747, 0.60925347]] * batch],
                                          output)
 
-  def _testGPipeTransformerStackFProp(self, num_splits=1, num_micro_batches=1):
+  def _testGPipeTransformerStackFProp(self, splits=1, num_micro_batches=1):
     batch = 4
     tf.flags.FLAGS.tpu_compatible = True
     with self.session() as sess:
       params = self._TransformerParams(
-          num_splits=num_splits, num_micro_batches=num_micro_batches)
+          splits=splits, num_micro_batches=num_micro_batches)
       params.dtype = tf.float32
       params.fprop_dtype = tf.float32
       xformer = GPipeTransformerStack(params)
@@ -172,12 +174,12 @@ class LayersWithGPipeTest(tf.test.TestCase):
                                           [[0.21085747, 0.60925347]] * batch],
                                          output)
 
-  def _testGPipeTransformerFPropPackedInput(self, num_splits=1):
+  def _testGPipeTransformerFPropPackedInput(self, splits=1):
     batch = 4
     tf.flags.FLAGS.tpu_compatible = True
     with self.session() as sess:
       with tf.variable_scope('transformer_test', reuse=tf.AUTO_REUSE):
-        params = self._TransformerParams(num_splits=num_splits)
+        params = self._TransformerParams(splits=splits)
         params.dtype = tf.float32
         params.fprop_dtype = tf.float32
         packed_params = params.Copy()
@@ -208,13 +210,13 @@ class LayersWithGPipeTest(tf.test.TestCase):
         self.assertAllClose(output, packed_output)
 
   def _testGPipeTransformerStackTrainTransparentFProp(self,
-                                                      num_splits=1,
+                                                      splits=1,
                                                       num_micro_batches=1):
     # time = 2,
     batch = 4
     with self.session() as sess:
       params = self._TransformerParams(
-          num_splits=num_splits,
+          splits=splits,
           num_micro_batches=num_micro_batches,
           num_decoder_layers=3,
           num_encoder_layers=1)
@@ -243,12 +245,12 @@ class LayersWithGPipeTest(tf.test.TestCase):
            [[-1.6950829, 1.75891507]] * batch])
 
   def _testGPipeTransformerStackTrainEncoderTransparentFProp(
-      self, num_splits=1, num_micro_batches=1):
+      self, splits=1, num_micro_batches=1):
     # time = 2,
     batch = 4
     with self.session() as sess:
       params = self._TransformerParams(
-          num_splits=num_splits,
+          splits=splits,
           num_micro_batches=num_micro_batches,
           num_decoder_layers=2,
           num_encoder_layers=2)
@@ -274,27 +276,6 @@ class LayersWithGPipeTest(tf.test.TestCase):
           dec_out,
           [[[-2.8764534, 1.00808454]] * batch, [[1.02129495, -0.78406084]] *
            batch, [[1.02129495, -0.78406084]] * batch])
-
-  def testDeterministicDropoutInsideFunctionalWhile(self):
-    with self.session() as sess:
-      cells = FeatureExtractionLayer.Params().Set(
-          name='cell',
-          sub=[
-              DeterministicDropoutLayer.Params().Set(
-                  name='dropout', keep_prob=0.7)
-          ])
-      p = PipeliningLayer.Params().Set(name='pipe', cell_tpl=[cells])
-      x = tf.ones([2, 3], dtype=tf.float32)
-      model = p.cls(p)
-      y = model.FPropDefaultTheta(x)
-      py_utils.GetOrCreateGlobalStep()
-      tf.global_variables_initializer().run()
-      y_val = sess.run(y)
-      self.assertAllClose([
-          [1.0 / 0.7, 1.0 / 0.7, 1.0 / 0.7],
-          [0.0, 0.0, 1.0 / 0.7],
-      ], y_val)
-      self.assertAllClose(5.7142859, np.sum(y_val))
 
   def testGPipeTransformerStackTrainTransparentFPropEval(self):
     # time = 2,
@@ -338,7 +319,7 @@ class LayersWithGPipeTest(tf.test.TestCase):
                                     [[0.76032472, -0.82791042]] * batch])
 
   def _testGPipeTransformerDecoderStackFProp(self,
-                                             num_splits=1,
+                                             splits=1,
                                              num_micro_batches=1):
     batch = 4
     tf.flags.FLAGS.tpu_compatible = True
@@ -346,7 +327,7 @@ class LayersWithGPipeTest(tf.test.TestCase):
       params = self._TransformerParams(
           num_decoder_layers=4,
           num_encoder_layers=0,
-          num_splits=num_splits,
+          splits=splits,
           num_micro_batches=num_micro_batches)
       params.dtype = tf.float32
       params.fprop_dtype = tf.float32
@@ -366,13 +347,17 @@ class LayersWithGPipeTest(tf.test.TestCase):
 
   def testGPipeTransformerEncoderFProp(self):
     self._testGPipeTransformerEncoderFPropDefaultTheta(
-        num_splits=2, num_micro_batches=2)
+        splits=2, num_micro_batches=2)
+
+  def testGPipeTransformerEncoderFPropWithManualSplits(self):
+    self._testGPipeTransformerEncoderFPropDefaultTheta(
+        splits=[4, 8], num_micro_batches=2)
 
   def testGPipeTransformerFPropPackedInput(self):
     self._testGPipeTransformerFPropPackedInput()
 
   def testGPipeTransformerFPropPackedInputTwoSplits(self):
-    self._testGPipeTransformerFPropPackedInput(num_splits=2)
+    self._testGPipeTransformerFPropPackedInput(splits=2)
 
   def testGPipeTransformerStackFPropNoSplit(self):
     self._testGPipeTransformerStackFProp()
@@ -384,22 +369,22 @@ class LayersWithGPipeTest(tf.test.TestCase):
     self._testGPipeTransformerStackFProp(num_micro_batches=4)
 
   def testGPipeTransformerStackFPropTwoSplits(self):
-    self._testGPipeTransformerStackFProp(num_splits=2)
+    self._testGPipeTransformerStackFProp(splits=2)
 
   def testGPipeTransformerStackFPropTwoSplitsTwoMicroBatches(self):
-    self._testGPipeTransformerStackFProp(num_splits=2, num_micro_batches=2)
+    self._testGPipeTransformerStackFProp(splits=2, num_micro_batches=2)
 
   def testGPipeTransformerStackFPropTwoSplitsFourMicroBatches(self):
-    self._testGPipeTransformerStackFProp(num_splits=2, num_micro_batches=4)
+    self._testGPipeTransformerStackFProp(splits=2, num_micro_batches=4)
 
   def testGPipeTransformerStackFPropFourSplits(self):
-    self._testGPipeTransformerStackFProp(num_splits=4)
+    self._testGPipeTransformerStackFProp(splits=4)
 
   def testGPipeTransformerStackFPropFourSplitsTwoMicroBatches(self):
-    self._testGPipeTransformerStackFProp(num_splits=4, num_micro_batches=2)
+    self._testGPipeTransformerStackFProp(splits=4, num_micro_batches=2)
 
   def testGPipeTransformerStackFPropFourSplitsFourMicroBatches(self):
-    self._testGPipeTransformerStackFProp(num_splits=4, num_micro_batches=4)
+    self._testGPipeTransformerStackFProp(splits=4, num_micro_batches=4)
 
   def testGPipeTransformerDecoderStackFPropNoSplit(self):
     self._testGPipeTransformerDecoderStackFProp()
@@ -411,26 +396,22 @@ class LayersWithGPipeTest(tf.test.TestCase):
     self._testGPipeTransformerDecoderStackFProp(num_micro_batches=4)
 
   def testGPipeTransformerDecoderStackFPropTwoSplits(self):
-    self._testGPipeTransformerDecoderStackFProp(num_splits=2)
+    self._testGPipeTransformerDecoderStackFProp(splits=2)
 
   def testGPipeTransformerDecoderStackFPropTwoSplitsTwoMicroBatches(self):
-    self._testGPipeTransformerDecoderStackFProp(
-        num_splits=2, num_micro_batches=2)
+    self._testGPipeTransformerDecoderStackFProp(splits=2, num_micro_batches=2)
 
   def testGPipeTransformerDecoderStackFPropTwoSplitsFourMicroBatches(self):
-    self._testGPipeTransformerDecoderStackFProp(
-        num_splits=2, num_micro_batches=4)
+    self._testGPipeTransformerDecoderStackFProp(splits=2, num_micro_batches=4)
 
   def testGPipeTransformerDecoderStackFPropFourSplits(self):
-    self._testGPipeTransformerDecoderStackFProp(num_splits=4)
+    self._testGPipeTransformerDecoderStackFProp(splits=4)
 
   def testGPipeTransformerDecoderStackFPropFourSplitsTwoMicroBatches(self):
-    self._testGPipeTransformerDecoderStackFProp(
-        num_splits=4, num_micro_batches=2)
+    self._testGPipeTransformerDecoderStackFProp(splits=4, num_micro_batches=2)
 
   def testGPipeTransformerDecoderStackFPropFourSplitsFourMicroBatches(self):
-    self._testGPipeTransformerDecoderStackFProp(
-        num_splits=4, num_micro_batches=4)
+    self._testGPipeTransformerDecoderStackFProp(splits=4, num_micro_batches=4)
 
   def testGPipeTransformerStackTrainTransparentFProp(self):
     self._testGPipeTransformerStackTrainTransparentFProp()
@@ -443,15 +424,19 @@ class LayersWithGPipeTest(tf.test.TestCase):
 
   def testGPipeTransformerStackTrainTransparentFPropTwoSplitsMB2(self):
     self._testGPipeTransformerStackTrainTransparentFProp(
-        num_splits=2, num_micro_batches=2)
+        splits=2, num_micro_batches=2)
+
+  def testGPipeTransformerStackTrainTransparentFPropTwoManualSplitsMB2(self):
+    self._testGPipeTransformerStackTrainTransparentFProp(
+        splits=[3, 4], num_micro_batches=2)
 
   def testGPipeTransformerStackTrainTransparentFPropTwoSplits2MB4(self):
     self._testGPipeTransformerStackTrainTransparentFProp(
-        num_splits=2, num_micro_batches=4)
+        splits=2, num_micro_batches=4)
 
   def testGPipeTransformerStackTrainTransparentFPropFourSplitsMB4(self):
     self._testGPipeTransformerStackTrainTransparentFProp(
-        num_splits=4, num_micro_batches=4)
+        splits=4, num_micro_batches=4)
 
   def testGPipeTransformerStackTrainEncoderTransparentFProp(self):
     self._testGPipeTransformerStackTrainEncoderTransparentFProp()
@@ -466,15 +451,83 @@ class LayersWithGPipeTest(tf.test.TestCase):
 
   def testGPipeTransformerStackTrainEncoderTransparentFPropTwoSplitsMB2(self):
     self._testGPipeTransformerStackTrainEncoderTransparentFProp(
-        num_splits=2, num_micro_batches=2)
+        splits=2, num_micro_batches=2)
+
+  def testGPipeTransformerStackTrainEncoderTransparentFPropManualSplitMB2(self):
+    self._testGPipeTransformerStackTrainEncoderTransparentFProp(
+        splits=[1, 4], num_micro_batches=2)
 
   def testGPipeTransformerStackTrainEncoderTransparentFPropTwoSplits2MB4(self):
     self._testGPipeTransformerStackTrainEncoderTransparentFProp(
-        num_splits=2, num_micro_batches=4)
+        splits=2, num_micro_batches=4)
 
   def testGPipeTransformerStackTrainEncoderTransparentFPropFourSplitsMB4(self):
     self._testGPipeTransformerStackTrainEncoderTransparentFProp(
-        num_splits=4, num_micro_batches=4)
+        splits=4, num_micro_batches=4)
+
+
+class DeterministicDropoutTest(tf.test.TestCase, parameterized.TestCase):
+  """Tests for DeterministicDropoutLayer."""
+
+  @parameterized.named_parameters(
+      {
+          'testcase_name': 'baseline',
+          'splits': 1,
+          'num_micro_batches': 1
+      },
+      {
+          'testcase_name': 'OneSplitTwoMicroBatches',
+          'splits': 1,
+          'num_micro_batches': 2
+      },
+      {
+          'testcase_name': 'TwoSplitsOneMicroBatch',
+          'splits': 2,
+          'num_micro_batches': 1
+      },
+      {
+          'testcase_name': 'TwoSplitsTwoMicroBatches',
+          'splits': 2,
+          'num_micro_batches': 2
+      },
+  )
+  def testDropoutInRecurrent(self, splits=1, num_micro_batches=1):
+    assert splits in [1, 2, 4]
+    with self.session() as sess:
+      tf.set_random_seed(12345)
+      num_layers = 4
+      py_utils.GetOrCreateGlobalStep()
+      # Build a model with 4 dropout layers.
+      layers = []
+      for l in range(num_layers):
+        layers.append(DeterministicDropoutLayer.Params().Set(
+            name='dropout_{}'.format(l), keep_prob=0.7))
+      # Divide the model into splits partitions.
+      cell_tpl = []
+      layers_per_split = num_layers // splits
+      for i in range(splits):
+        sub = layers[i * layers_per_split:(i + 1) * layers_per_split]
+        cell_tpl.append(FeatureExtractionLayer.Params().Set(
+            name='cell_{}'.format(i), sub=sub))
+      # Parallelize partitions using pipeline.
+      p = PipeliningLayer.Params().Set(
+          name='pipeline',
+          num_micro_batches=num_micro_batches,
+          cell_tpl=cell_tpl)
+      # Fake input
+      x = tf.ones([2, 3])
+      # Construct weights.
+      w = tf.get_variable(
+          'w', shape=[2, 3], initializer=tf.constant_initializer([[1] * 3] * 2))
+      mdl = p.cls(p)
+      y = mdl.FPropDefaultTheta(x * w)
+      # Construct loss function such that gradients = final activation.
+      loss = tf.reduce_sum(y)
+      grads = py_utils.ComputeGradients(loss, py_utils.NestedMap(w=w))
+      tf.global_variables_initializer().run()
+      y_val = sess.run(y)
+      grads_val = sess.run(grads)['w'][1]
+      self.assertAllClose(y_val, grads_val)
 
 
 if __name__ == '__main__':

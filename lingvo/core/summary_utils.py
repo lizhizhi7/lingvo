@@ -119,13 +119,10 @@ def AddAttentionSummary(attention_tensors,
     transcripts: Optional, transcripts shaped [batch, target_len] for the source
       sequence.
     max_outputs: Integer maximum number of elements of the batch to plot.
-
-  Returns:
-    The added image summary.
   """
   name = attention_tensors[0].name + '/Attention'
   if not _ShouldAddSummary():
-    return tf.summary.scalar('disabled_%s' % name, 0)
+    return
   fig = plot.MatplotlibFigureSummary(name, max_outputs=max_outputs)
   src_lens = SequenceLength(tf.transpose(src_paddings))
   tgt_lens = SequenceLength(tf.transpose(tgt_paddings))
@@ -145,7 +142,7 @@ def AddAttentionSummary(attention_tensors,
         title=atten.name,
         xlabel='Input',
         ylabel='Output')
-  return fig.Finalize()
+  fig.Finalize()
 
 
 def AddNormSummary(name, vs_gs):
@@ -169,18 +166,14 @@ def AddNormSummary(name, vs_gs):
 def CollectVarHistogram(vs_gs):
   """Adds histogram summaries for variables and gradients."""
 
-  def SummaryNamePrefix(n):
-    return n.split(':')[0].replace('/', '.') + '/'
-
-  for var, grad in vs_gs.Flatten():
-    with tf.device(
-        var.device), tf.name_scope(var.name.split(':')[0] + '/summary'):
-      name_prefix = SummaryNamePrefix(var.name)
+  for name, (var, grad) in vs_gs.FlattenItems():
+    with tf.device(var.device), tf.name_scope(name + '/summary'):
       if isinstance(grad, tf.IndexedSlices):
         var = tf.gather(var, grad.indices)
         grad = grad.values
       if var.dtype.is_complex:
         var = tf.abs(var)
         grad = tf.abs(grad)
-      histogram(name_prefix + 'var_hist', var)
-      histogram(name_prefix + 'grad_hist', grad)
+
+    histogram('var_hist/' + name, var)
+    histogram('grad_hist/' + name, grad)

@@ -183,7 +183,7 @@ py_library(
         ":base_trial",
         ":model_registry",
         ":trainer_lib",
-        # Implicit six dependency.
+        # Implicit numpy dependency.
         # Implicit tensorflow dependency.
         "//lingvo/core:base_input_generator",
         "//lingvo/core:base_layer",
@@ -192,7 +192,7 @@ py_library(
         "//lingvo/core:trainer_test_utils",
         "//lingvo/tasks/image:input_generator",
         "//lingvo/tasks/image/params:mnist",
-        "//lingvo/tasks/lm/params:one_billion_wds",
+        "//lingvo/tasks/punctuator/params",
     ],
 )
 
@@ -205,7 +205,7 @@ lingvo_py_binary(
     deps = [
         ":model_imports",  # build_cleaner: keep
         ":trainer_lib",  # build_cleaner: keep
-        "//lingvo/core:predictor",  # build_cleaner: keep
+        "//lingvo/core:predictor_lib",  # build_cleaner: keep
         "//lingvo/core/ops:hyps_py_pb2",  # build_cleaner: keep
     ],
 )

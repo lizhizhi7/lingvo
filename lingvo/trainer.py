@@ -39,10 +39,12 @@ import time
 
 import numpy as np
 import six
+from six.moves import xrange  # pylint: disable=redefined-builtin
 from six.moves import zip
 import tensorflow as tf
 
 from lingvo import base_runner
+from tensorflow.contrib.tpu.python.tpu import tpu_function
 from tensorflow.core.protobuf import config_pb2
 from lingvo import base_trial
 from lingvo import model_registry
@@ -611,6 +613,7 @@ class TrainerTpu(base_runner.BaseRunner):
               summed_metrics.append(x + y)
           return summed_metrics + [self._model.GetTask().train_op]
 
+        @tpu_function.on_device_training_loop
         def TpuTrain():
           loop_result = tf.contrib.tpu.repeat(
               self._steps_per_loop,
@@ -1487,7 +1490,11 @@ class RunnerManager(object):
           model_cfg=cfg,
           model_task_name=FLAGS.model_task_name,
           export_path=filename_prefix + '.pbtxt')
-      # TPU inference graph.
+    except NotImplementedError as e:
+      tf.logging.error('Cannot write inference graph: %s', e)
+
+    # TPU inference graph. Not all models support it so fail silently.
+    try:
       self.inference_graph_exporter.InferenceGraphExporter.Export(
           model_cfg=cfg,
           model_task_name=FLAGS.model_task_name,
@@ -1498,8 +1505,8 @@ class RunnerManager(object):
               gen_init_op=True,
               dtype_override=None),
           export_path=filename_prefix + '_tpu.pbtxt')
-    except NotImplementedError as e:
-      tf.logging.error('Cannot write inference graph: %s', e)
+    except Exception as e:  # pylint: disable=broad-except
+      tf.logging.info('Error exporting TPU inference graph: %s' % e)
 
   def Start(self):
     """Start the process."""

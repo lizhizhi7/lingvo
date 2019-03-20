@@ -71,7 +71,7 @@ tf.flags.DEFINE_bool(
 
 tf.flags.DEFINE_bool(
     'no_identity_on_vars', False,
-    'Do not add tf.identity() on vars. This allows TPUPartionedCallOp to use'
+    'Do not add tf.identity() on vars. This allows TPUPartitionedCallOp to use'
     'variable handles directly for weight-sharing / multi-core '
     'inference on TPUs.')
 
@@ -253,7 +253,9 @@ def Save(value, filename_prefix, **kwargs):
 def HasRank(tensor, expected_rank):
   """Syntactic sugar for asserting that tensor has the expected rank."""
   if tensor.shape.ndims is not None and isinstance(expected_rank, int):
-    assert tensor.shape.ndims == expected_rank
+    assert tensor.shape.ndims == expected_rank, (
+        'Ranks did not match, got %d, '
+        'expected %d') % (tensor.shape.ndims, expected_rank)
     return tensor
   if FLAGS.enable_asserts:
     return with_dependencies([tf.assert_equal(tf.rank(tensor), expected_rank)],
@@ -1802,9 +1804,13 @@ def VariationalNoiseParams(scale, global_vn=False, per_step_vn=False,
 def GetStepSeed():
   """Gets step_seed."""
   step_seed_tensors = tf.get_default_graph().get_collection_ref('step_seed')
-  if len(step_seed_tensors) == 1:
+  if not step_seed_tensors:
+    ResetStepSeed()
+    return GetStepSeed()
+  elif len(step_seed_tensors) == 1:
     return step_seed_tensors[0]
-  return None
+  else:
+    raise ValueError('Multiple tensors in step_seed collection.')
 
 
 def ResetStepSeed(seed=0):
@@ -1828,18 +1834,45 @@ def GetIncStepSeed():
   return step_seed
 
 
-def GetOpSeedPair(op_seed=None):
-  """Returns the seed pair for an operation given op_seed."""
-  step_seed = GetIncStepSeed()
-  global_step = tf.train.get_or_create_global_step()
-  seeds = tf.stack([global_step, tf.cast(step_seed, global_step.dtype)])
+def GenerateStepSeedPair(p, op_seed=None):
+  """Generates a seed pair for deterministic random operations in functional loops.
 
+  This function retrieves a unique seed pair on each call, based off the current
+  global step and step seed. The step seed ensures this function returns a
+  unique seed pair on each call: calling this function automatically increments
+  the step seed. The step seed is automatically reset at the beginning of each
+  global step in the model's FProp.
+
+  Args:
+    p: A hyperparams.Params object, containing keys 'random_seed' and
+      'is_inference'.
+    op_seed: An additional operation-level seed to apply.
+
+  Returns:
+    A size 2 tensor of op seeds to use for stateless_random ops.
+  """
+  seed_dtype = tf.int32 if use_tpu() else tf.int64
+  if p.is_inference and p.random_seed is None:
+    # Ensure GetIncStepSeed is called even inside the shortcut.
+    # This ensures if p.random_seed is set for other ops that use this function
+    # that they will get the same seed pair whether or not p.random_seed is set
+    # for this specific call.
+    GetIncStepSeed()
+    # Unlike tf.random*, stateless random ops are completely determined by the
+    # passed-in seeds. This means at inference time the same inputs will produce
+    # the same outputs, even if the model is supposed to have randomness such as
+    # dropout during inference. We inject additional randomness only during
+    # inference if the graph is exported with random_seed=None as a workaround.
+    return tf.random_uniform([2], maxval=seed_dtype.max, dtype=seed_dtype)
+
+  global_step = tf.cast(GetOrCreateGlobalStep(), seed_dtype)
+  step_seed = tf.cast(GetIncStepSeed(), seed_dtype)
+  seeds = tf.stack([global_step, step_seed])
+
+  if p.random_seed is not None:
+    seeds += p.random_seed
   if op_seed is not None:
     seeds += op_seed
-
-  if use_tpu():
-    seeds = tf.cast(seeds, tf.int32)
-
   return seeds
 
 
@@ -2127,7 +2160,7 @@ def PadSequenceDimension(x, length, pad_val, shape=None):
     pad_len = length - slen
     pad = tf.scatter_nd([[1, 1]], [pad_len], [rank, 2])
   x = tf.pad(x, pad, constant_values=pad_val)
-  if x.shape.ndims is not None:
+  if x.shape.ndims is not None and isinstance(length, int):
     static_shape = x.shape.as_list()
     static_shape[1] = length
     x.set_shape(static_shape)
@@ -2194,6 +2227,34 @@ def ApplyPadding(padding, x, padded=None, broadcast=True, use_select=True):
       return x * (1.0 - padding) + padded * padding
 
 
+def TrimTrailingPaddings(inputs, paddings):
+  """Trims trailing paddings from inputs.
+
+  Since the number of dimensions is not fixed, this will not work on TPU.
+
+  Args:
+    inputs: a tensor with shape [batch, length, ...].
+    paddings: a tensor with shape [batch, length].
+
+  Returns:
+    Trimmed inputs and paddings. For compatibility reasons, the trimmed tensors
+    will always have length at least 1.
+  """
+  paddings = HasRank(paddings, 2)
+  # Find the last unpadded value. Argmax returns the first index when tied.
+  # Cannot just use tf.reduce_sum because there might be leading paddings.
+  cumsum = tf.cumsum(1.0 - paddings, axis=1)
+  length = tf.argmax(cumsum, axis=1, output_type=tf.int32) + 1
+  max_length = tf.reduce_max(length)
+  output_shape = tf.shape(inputs)
+  output_shape = tf.concat([[output_shape[0], max_length], output_shape[2:]],
+                           axis=0)
+  outputs = tf.slice(inputs, tf.zeros_like(output_shape), output_shape)
+  out_paddings = tf.slice(paddings, [0, 0],
+                          tf.stack([output_shape[0], max_length]))
+  return outputs, out_paddings
+
+
 def ReversePaddedSequence(inputs, paddings):
   """Reverse inputs based on paddings.
 
@@ -2241,7 +2302,13 @@ def PadOrTrimTo(x, shape, pad_val=0):
     'x' is padded with pad_val and sliced so that the result has the given
     shape.
   """
-  x = HasRank(x, len(shape))
+  if isinstance(shape, list):
+    expected_rank = len(shape)
+  elif isinstance(shape, tf.TensorShape):
+    expected_rank = shape.rank
+  else:
+    expected_rank = tf.rank(shape)
+  x = HasRank(x, expected_rank)
   # If dim-i is less than shape[i], pads on the right shape[i] -
   # dim-i.  Otherwise, pads [0, 0] for dim-i.
   pad = shape - tf.minimum(tf.shape(x), shape)

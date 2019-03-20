@@ -32,6 +32,13 @@ from lingvo.core import lr_schedule
 
 class LearningRateScheduleTest(tf.test.TestCase):
 
+  def testConstantOne(self):
+    with self.session(use_gpu=False):
+      p = lr_schedule.ConstantOne.Params()
+      lrs = p.cls(p)
+      for x in [0, 10, 100, 1000000]:
+        self.assertAllClose(lrs.Value(x).eval(), 1.0)
+
   def testPiecewiseConstant(self):
     cls = lr_schedule.PiecewiseConstantLearningRateSchedule
     with self.session(use_gpu=False):
@@ -402,6 +409,26 @@ class LearningRateScheduleTest(tf.test.TestCase):
           pts,
           [
               [0, 2.0],
+              [100000, math.cos(math.pi / 4) + 1.],  # angle=pi/4
+              [200000, 1.0],  # angle=pi/2, half-way
+              [300000, math.cos(math.pi * 3 / 4) + 1.],  # angle=pi*3/4
+              [400000, 0.0],
+          ])
+
+  def testLinearRampupCosineSchedule(self):
+    p = lr_schedule.LinearRampupCosineSchedule.Params().Set(
+        warmup_steps=200, initial_value=2.0, total_steps=400000)
+    with self.session():
+      lrs = p.cls(p)
+
+      pts = [[i, lrs.Value(i).eval()]
+             for i in [0, 100, 200, 100000, 200000, 300000, 400000]]
+      self.assertAllClose(
+          pts,
+          [
+              [0, 0.0],
+              [100, 1.0],
+              [200, 2.0],
               [100000, math.cos(math.pi / 4) + 1.],  # angle=pi/4
               [200000, 1.0],  # angle=pi/2, half-way
               [300000, math.cos(math.pi * 3 / 4) + 1.],  # angle=pi*3/4

@@ -139,7 +139,9 @@ def ConvertSubgraphDictToProto(subgraphs_dict):
 
     # Rewrite fetches and feeds to map to their tensor name instead of
     # Tensor instance.
-    named_fetches = {k: v.name for k, v in six.iteritems(fetches)}
+    named_fetches = {
+        k: v.name for k, v in six.iteritems(fetches) if v is not None
+    }
     named_feeds = {k: v.name for k, v in six.iteritems(feeds)}
 
     # Export as subgraph.
@@ -271,7 +273,6 @@ class InferenceGraphExporter(object):
   def Export(cls,
              model_cfg,
              model_task_name=None,
-             per_step_inference=False,
              device_options=InferenceDeviceOptions(
                  device='',
                  retain_device_placement=False,
@@ -281,7 +282,8 @@ class InferenceGraphExporter(object):
              freeze_checkpoint=None,
              freeze_defaults=False,
              export_path=None,
-             subgraph_filter=None):
+             subgraph_filter=None,
+             random_seed=None):
     """Exports a InferenceGraph proto with piecewise subgraphs.
 
     Sets FLAGS.enable_asserts to False unless user explicitly sets it to True.
@@ -291,8 +293,6 @@ class InferenceGraphExporter(object):
         model_registry.GetParams(modelname, 'Test') or model_params.Model().
       model_task_name: The task to generate an inference graph for. Should be
         None for single-task models.
-      per_step_inference: Whether the exported graph will be driven step-by-step
-        instead of being end-to-end.
       device_options: Device options for the accelerator used for serving.
       freeze_checkpoint: The checkpoint to load. Loads and freezes the model if
         given.
@@ -301,6 +301,7 @@ class InferenceGraphExporter(object):
       export_path: If not None, write the inference graph in ASCII to this path.
       subgraph_filter: If not None or empty, export only this list of inference
         subgraphs.
+      random_seed: Fixes the random seed in the exported inference graph.
 
     Returns:
       InferenceGraph proto.
@@ -328,15 +329,14 @@ class InferenceGraphExporter(object):
         task.decoder.packed_input = False
 
     # Configure the model.
+    model_cfg.random_seed = random_seed
     model_cfg.is_eval = True
     model_cfg.is_inference = True
 
     if issubclass(model_cfg.cls, base_model.MultiTaskModel):
       for _, task_param in model_cfg.task_params.IterParams():
-        task_param.per_step_infer = per_step_inference
         _DisablePackedInput(task_param)
     else:
-      model_cfg.task.per_step_infer = per_step_inference
       _DisablePackedInput(model_cfg.task)
 
     tf.logging.info('Model %s. Params: %s', model_cfg.name, model_cfg.ToText())
@@ -363,11 +363,14 @@ class InferenceGraphExporter(object):
           py_utils.UpdateDtype(model_cfg, tf.bfloat16)
           py_utils.UpdateFpropDtype(model_cfg, tf.bfloat16)
 
+        # Hard-code TPU-related flags prior to instantiating model.
         old_enable_asserts = FLAGS.enable_asserts
+        old_xla_device = FLAGS.xla_device
         if IsTpu(device_options):
           FLAGS.enable_asserts = False
+          FLAGS.xla_device = 'tpu'
+
         mdl = model_cfg.cls(model_cfg)
-        FLAGS.enable_asserts = old_enable_asserts
         variables_to_restore = (
             _MakeVariableDictionary(tf.global_variables())
             if not mdl.ema else mdl.ema.variables_to_restore())
@@ -400,6 +403,10 @@ class InferenceGraphExporter(object):
         # Tables can be declared anywhere in the graph, so this op has to be
         # added last.
         tf.tables_initializer(name='init_all_tables')
+
+        # Reset TPU-related flags after model instantiation.
+        FLAGS.enable_asserts = old_enable_asserts
+        FLAGS.xla_device = old_xla_device
 
     tf.logging.info('Graph contains ops: %r',
                     [op.name for op in graph.get_operations()])
@@ -470,6 +477,7 @@ class InferenceGraphExporter(object):
 
     cluster_params.mode = 'sync'
     cluster_params.job = 'decoder'
+    cluster_params.add_summary = False
     Update(cluster_params.controller)
     Update(cluster_params.worker)
     Update(cluster_params.ps)

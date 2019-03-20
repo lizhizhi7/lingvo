@@ -1215,6 +1215,95 @@ class ApplyPaddingTest(tf.test.TestCase):
       self.assertAllClose(y, [[1.0, 2.0], [0.0, 4.0], [5.0, 0.0]])
 
 
+class TrimTrailingPaddingsTest(tf.test.TestCase):
+
+  def test2D(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      np.random.seed(123456)
+      x = np.random.normal(size=(3, 6))
+      padding = np.array([
+          [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+          [1.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+          [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+      ])
+      trimmed_x, trimmed_padding = sess.run(
+          py_utils.TrimTrailingPaddings(x, tf.convert_to_tensor(padding)))
+      self.assertAllEqual(x[:, :5], trimmed_x)
+      self.assertAllEqual(padding[:, :5], trimmed_padding)
+
+  def test2D_UnknownShape(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      shape = tf.placeholder(tf.int32)
+      x = tf.random_normal(shape=shape, seed=123456)
+      padding = np.array([
+          [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+          [1.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+          [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+      ])
+      actual_x, (trimmed_x, trimmed_padding) = sess.run(
+          [x,
+           py_utils.TrimTrailingPaddings(x, tf.convert_to_tensor(padding))],
+          feed_dict={shape: [3, 6]})
+      self.assertAllEqual(actual_x[:, :5], trimmed_x)
+      self.assertAllEqual(padding[:, :5], trimmed_padding)
+
+  def test4D(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      np.random.seed(123456)
+      x = np.random.normal(size=(3, 6, 3, 3))
+      padding = np.array([
+          [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+          [1.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+          [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+      ])
+      trimmed_x, trimmed_padding = sess.run(
+          py_utils.TrimTrailingPaddings(x, tf.convert_to_tensor(padding)))
+      self.assertAllEqual(x[:, :5], trimmed_x)
+      self.assertAllEqual(padding[:, :5], trimmed_padding)
+
+  def testNoPadding(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      np.random.seed(123456)
+      x = np.random.normal(size=(3, 6))
+      padding = np.array([
+          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      ])
+      trimmed_x, trimmed_padding = sess.run(
+          py_utils.TrimTrailingPaddings(x, tf.convert_to_tensor(padding)))
+      self.assertAllEqual(x, trimmed_x)
+      self.assertAllEqual(padding, trimmed_padding)
+
+  def testLeadingPaddingOnly(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      np.random.seed(123456)
+      x = np.random.normal(size=(3, 6))
+      padding = np.array([
+          [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      ])
+      trimmed_x, trimmed_padding = sess.run(
+          py_utils.TrimTrailingPaddings(x, tf.convert_to_tensor(padding)))
+      self.assertAllEqual(x, trimmed_x)
+      self.assertAllEqual(padding, trimmed_padding)
+
+  def testAllPadded(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      np.random.seed(123456)
+      x = np.random.normal(size=(3, 6))
+      padding = np.array([
+          [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+          [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+          [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      ])
+      trimmed_x, trimmed_padding = sess.run(
+          py_utils.TrimTrailingPaddings(x, tf.convert_to_tensor(padding)))
+      self.assertAllEqual([3, 1], trimmed_x.shape)
+      self.assertAllEqual(padding[:, :1], trimmed_padding)
+
+
 class ReversePaddedSequenceTest(tf.test.TestCase):
 
   def testReversePaddedSequence(self):
@@ -1348,10 +1437,11 @@ class SequencesToDebugStrings(tf.test.TestCase):
 class StepSeedTest(tf.test.TestCase):
 
   def testStepSeed(self):
+    p = base_layer.BaseLayer.Params()
     state0 = py_utils.NestedMap(
         input=tf.constant(0, dtype=tf.int64),
         seed_pair=tf.zeros(2, dtype=tf.int64),
-        step_seed=tf.constant(0, dtype=tf.int64),
+        step_seed=py_utils.GetStepSeed(),
         global_step=py_utils.GetOrCreateGlobalStep())
     inputs = py_utils.NestedMap(input=tf.range(10, dtype=tf.int64))
 
@@ -1359,13 +1449,13 @@ class StepSeedTest(tf.test.TestCase):
       graph = tf.get_default_graph()
       if not graph.get_collection(tf.GraphKeys.GLOBAL_STEP):
         graph.add_to_collection(tf.GraphKeys.GLOBAL_STEP, state0.global_step)
-      py_utils.ResetStepSeed(seed=state0.step_seed)
+      py_utils.ResetStepSeed(state0.step_seed)
 
       state1 = py_utils.NestedMap()
       state1.input = inputs.input
-      state1.seed_pair = py_utils.GetOpSeedPair()
-      state1.step_seed = graph.get_collection_ref('step_seed')[0]
-      state1.global_step = tf.train.get_global_step(graph)
+      state1.seed_pair = py_utils.GenerateStepSeedPair(p)
+      state1.step_seed = py_utils.GetStepSeed()
+      state1.global_step = py_utils.GetOrCreateGlobalStep()
       return state1, py_utils.NestedMap()
 
     accumulated_states, _ = recurrent.Recurrent(py_utils.NestedMap(), state0,

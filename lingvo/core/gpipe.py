@@ -12,11 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""A recurrent model which enables pipelinng model parallelism.
+"""A recurrent model which enables pipelining model parallelism.
 
 Reference:
 'GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism'
 https://arxiv.org/abs/1811.06965
+
+Example implementation of Transformer Language model:
+tasks/lm/layers.GPipeTransformerLm
+
+Sample params for the one billion words task:
+tasks/lm/params/one_billion_wds.OneBWdsGPipeTransformer.
+
+More examples in machine translation, image classifications and others
+will be included.
 """
 
 from __future__ import absolute_import
@@ -42,7 +51,7 @@ def GetOverWriteGlobalStep(graph=None):
   if len(mb_tensors) == 1:
     mb_tensor = mb_tensors[0]
   else:
-    mb_tensor = tf.train.get_global_step(graph)
+    mb_tensor = py_utils.GetOrCreateGlobalStep()
   return mb_tensor
 
 
@@ -55,12 +64,24 @@ def SetOverWriteGlobalStep(tensor, graph=None):
     graph.add_to_collection(_OVERWRITE_GLOBAL_STEP_COLLECTION, tensor)
 
 
-def GetOpSeedPair(op_seed=None):
+def GenerateStepSeedPair(p, op_seed=None):
+  """Override py_utils.GenerateStepSeedPair to use GetOverWriteGlobalStep."""
+  seed_dtype = tf.int32 if py_utils.use_tpu() else tf.int64
+  if p.is_inference and p.random_seed is None:
+    # Unlike tf.random*, stateless random ops are completely determined by the
+    # passed-in seeds. This means at inference time the same inputs will produce
+    # the same outputs, even if the model is supposed to have randomness such as
+    # dropout during inference. We inject additional randomness only during
+    # inference if the graph is exported with random_seed=None as a workaround.
+    return tf.random_uniform([2], maxval=seed_dtype.max, dtype=seed_dtype)
+
   with tf.name_scope('op_seed') as scope:
-    mb_tensor = GetOverWriteGlobalStep()
-    seeds = tf.stack(
-        [tf.cast(mb_tensor, tf.int32),
-         py_utils.GenerateSeedFromName(scope)])
+    global_step = tf.cast(GetOverWriteGlobalStep(), seed_dtype)
+    step_seed = tf.cast(py_utils.GenerateSeedFromName(scope), seed_dtype)
+    seeds = tf.stack([global_step, step_seed])
+
+    if p.random_seed is not None:
+      seeds += p.random_seed
     if op_seed is not None:
       seeds += op_seed
     return seeds
@@ -73,9 +94,9 @@ def CellFnFropOpReplacementWrapper():
   # op replacement for lingvo. As assert_equal doesn't support String on GPUs.
   # Hack to replace tf.assert_equal
   saved_assert_equal = tf.assert_equal
-  # Hack to replace GetOpSeedPair since global_step is not available
+  # Hack to replace GenerateStepSeedPair since global_step is not available
   # in temp graph created by optional.while.
-  saved_get_op_seed = py_utils.GetOpSeedPair
+  saved_get_op_seed = py_utils.GenerateStepSeedPair
 
   # pylint: disable=unused-argument
   def NoOP(*args, **kwargs):
@@ -83,12 +104,12 @@ def CellFnFropOpReplacementWrapper():
 
   # pylint: enable=unused-argument
   tf.assert_equal = NoOP  # Make assert_equal a no op.
-  py_utils.GetOpSeedPair = GetOpSeedPair
+  py_utils.GenerateStepSeedPair = GenerateStepSeedPair
 
   yield
 
   tf.assert_equal = saved_assert_equal
-  py_utils.GetOpSeedPair = saved_get_op_seed
+  py_utils.GenerateStepSeedPair = saved_get_op_seed
 
 
 def _ToTuple(x):
@@ -401,7 +422,7 @@ class PipeliningLayer(SeqLayer):
         previous = l.FProp(theta[name], *previous)
         previous = _ToTuple(previous)
       inputs = py_utils.NestedMap()
-      gs_tensor = tf.train.get_or_create_global_step()
+      gs_tensor = py_utils.GetOrCreateGlobalStep()
       inputs[_MICRO_BATCH_STATE_NAME] = tf.stack([
           tf.cast(gs_tensor * p.num_micro_batches + t, dtype=input_dtype)
           for t in range(p.num_micro_batches)
